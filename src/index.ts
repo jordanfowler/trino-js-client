@@ -6,6 +6,8 @@ const DEFAULT_SERVER = 'http://localhost:8080';
 const DEFAULT_SOURCE = 'trino-js-client';
 const DEFAULT_USER = process.env.USER;
 
+const AUTHORIZATION_HEADER = 'Authorization';
+
 // Trino headers
 const TRINO_HEADER_PREFIX = 'X-Trino-';
 const TRINO_PREPARED_STATEMENT_HEADER =
@@ -24,7 +26,7 @@ const TRINO_CLEAR_SESSION_HEADER = TRINO_HEADER_PREFIX + 'Clear-Session';
 const TRINO_SET_ROLE_HEADER = TRINO_HEADER_PREFIX + 'Set-Role';
 const TRINO_EXTRA_CREDENTIAL_HEADER = TRINO_HEADER_PREFIX + 'Extra-Credential';
 
-export type AuthType = string;
+export type AuthType = 'basic' | 'jwt';
 
 export interface Auth {
   readonly type: AuthType;
@@ -33,6 +35,11 @@ export interface Auth {
 export class BasicAuth implements Auth {
   readonly type: AuthType = 'basic';
   constructor(readonly username: string, readonly password?: string) {}
+}
+
+export class JwtAuth implements Auth {
+  readonly type: AuthType = 'jwt';
+  constructor(readonly user: string, readonly accessToken: string) {}
 }
 
 export type Session = {[key: string]: string};
@@ -164,7 +171,7 @@ const cleanHeaders = (headers: RawAxiosRequestHeaders) => {
 };
 
 /* It's a wrapper around the Axios library that adds some Trino specific headers to the requests */
-class Client {
+export class Client {
   private constructor(
     private readonly clientConfig: AxiosRequestConfig,
     private readonly options: ConnectionOptions
@@ -189,14 +196,23 @@ class Client {
       ),
     };
 
-    if (options.auth && options.auth.type === 'basic') {
-      const basic: BasicAuth = <BasicAuth>options.auth;
-      clientConfig.auth = {
-        username: basic.username,
-        password: basic.password ?? '',
-      };
+    switch (options.auth?.type) {
+      case 'basic': {
+        const basic: BasicAuth = <BasicAuth>options.auth;
+        clientConfig.auth = {
+          username: basic.username,
+          password: basic.password ?? '',
+        };
 
-      headers[TRINO_USER_HEADER] = basic.username;
+        headers[TRINO_USER_HEADER] = basic.username;
+        break;
+      }
+      case 'jwt': {
+        const jwt: JwtAuth = <JwtAuth>options.auth;
+        headers[AUTHORIZATION_HEADER] = `Bearer ${jwt.accessToken}`;
+        headers[TRINO_USER_HEADER] = jwt.user;
+        break;
+      }
     }
 
     clientConfig.headers = cleanHeaders(headers);
@@ -253,7 +269,7 @@ class Client {
    * @param {Query | string} query - The query to execute.
    * @returns A promise that resolves to a QueryResult object.
    */
-  async query(query: Query | string): Promise<Iterator<QueryResult>> {
+  async query(query: Query | string): Promise<QueryIterator> {
     const req = typeof query === 'string' ? {query} : query;
     const headers: RawAxiosRequestHeaders = {
       [TRINO_USER_HEADER]: req.user,
@@ -271,7 +287,7 @@ class Client {
       headers: cleanHeaders(headers),
     };
     return this.request<QueryResult>(requestConfig).then(
-      result => new Iterator(new QueryIterator(this, result))
+      result => new QueryIterator(this, result)
     );
   }
 
@@ -411,7 +427,7 @@ export class Trino {
    * @returns A QueryIterator object.
    */
   async query(query: Query | string): Promise<Iterator<QueryResult>> {
-    return this.client.query(query);
+    return new Iterator(await this.client.query(query));
   }
 
   /**
